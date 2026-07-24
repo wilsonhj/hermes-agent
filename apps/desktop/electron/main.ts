@@ -65,6 +65,7 @@ import {
   savedProfileSsh,
   tokenPreview
 } from './connection-config'
+import { installContentSecurityPolicy } from './content-security-policy'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import {
@@ -10675,6 +10676,16 @@ app.whenReady().then(() => {
 
   installMediaPermissions()
   registerMediaProtocol()
+  // Narrow the renderer's CSP to the production policy in a packaged build (the
+  // <meta> tag in index.html is the dev-flavoured superset; a header can only
+  // narrow it). Must run before createWindow() so the first document is covered.
+  // The dev-server / packaged-file:// split mirrors the will-navigate guard in
+  // wireCommonWindowHandlers.
+  installContentSecurityPolicy(session.defaultSession, {
+    mode: DEV_SERVER ? 'development' : 'production',
+    devServer: DEV_SERVER,
+    rendererIndexUrl: DEV_SERVER ? null : pathToFileURL(resolveRendererIndex()).toString()
+  })
   installEmbedReferer()
   registerDeepLinkProtocol()
   ensureWslWindowsFonts()
