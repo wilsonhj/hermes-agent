@@ -3,6 +3,33 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { errorCode, errorMessage } from './error-narrowing'
+
+// Electron's `safeStorage`, structurally. Declared here (rather than importing
+// `electron`) so this module stays dependency-free and testable with a stub.
+interface SafeStorageApi {
+  encryptString: (plainText: string) => Buffer
+  isEncryptionAvailable?: () => boolean
+}
+
+// The stat facts the directory path needs. Deliberately minimal so callers can
+// inject a stub instead of a full `fs.Stats`.
+interface IpcDirStat {
+  isDirectory: () => boolean
+}
+
+// The `node:fs` slice `resolveDirectoryForIpc` reaches for. Both members are
+// optional because callers legitimately inject partial stubs covering only the
+// code path they exercise; a missing member throws inside the try/catch that
+// already wraps every stat/realpath call and surfaces as a read-error, which is
+// the long-standing behaviour of these helpers.
+interface IpcDirFs {
+  promises: {
+    realpath?: ((statPath: string) => Promise<string>) | undefined
+    stat?: ((statPath: string) => Promise<IpcDirStat>) | undefined
+  }
+}
+
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000
 const DATA_URL_READ_MAX_BYTES = 16 * 1024 * 1024
 const TEXT_PREVIEW_SOURCE_MAX_BYTES = 64 * 1024 * 1024
@@ -10,7 +37,7 @@ const TEXT_PREVIEW_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 const SAFE_ENV_SUFFIXES = new Set(['dist', 'example', 'sample', 'template'])
 const SENSITIVE_EXTENSIONS = new Set(['.kdbx', '.p12', '.pem', '.pfx'])
 
-function resolveTimeoutMs(timeoutMs, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
+function resolveTimeoutMs(timeoutMs: unknown, fallbackMs: unknown = DEFAULT_FETCH_TIMEOUT_MS): number {
   const fallback =
     Number.isFinite(fallbackMs) && Number(fallbackMs) > 0 ? Math.round(Number(fallbackMs)) : DEFAULT_FETCH_TIMEOUT_MS
 
@@ -23,7 +50,10 @@ function resolveTimeoutMs(timeoutMs, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
   return fallback
 }
 
-function encryptDesktopSecret(value, safeStorageApi) {
+function encryptDesktopSecret(
+  value: unknown,
+  safeStorageApi: null | SafeStorageApi | undefined
+): { encoding: string; value: string } | null {
   const raw = String(value || '')
 
   if (!raw) {
@@ -48,10 +78,14 @@ function encryptDesktopSecret(value, safeStorageApi) {
   try {
     return {
       encoding: 'safeStorage',
-      value: safeStorageApi.encryptString(raw).toString('base64')
+      // `encryptionAvailable` can only be true when `safeStorageApi` is
+      // present — the optional chain above yields undefined otherwise — so the
+      // assertion restates the guard rather than weakening it.
+      value: safeStorageApi!.encryptString(raw).toString('base64')
     }
   } catch (error) {
     const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
+
     throw new Error(
       `Failed to encrypt the remote gateway token for secure storage${detail}. ` +
         'Set HERMES_DESKTOP_REMOTE_URL and HERMES_DESKTOP_REMOTE_TOKEN in your environment as a fallback.'
@@ -59,7 +93,7 @@ function encryptDesktopSecret(value, safeStorageApi) {
   }
 }
 
-function sensitiveFileBlockReason(filePath) {
+function sensitiveFileBlockReason(filePath: unknown): null | string {
   const normalized = String(filePath || '')
     .replace(/\\/g, '/')
     .toLowerCase()
@@ -110,15 +144,15 @@ function sensitiveFileBlockReason(filePath) {
   return null
 }
 
-function ipcPathError(code: any, message: string): Error & { code: any } {
-  const error = new Error(message) as Error & { code: any }
+function ipcPathError(code: string, message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string }
 
-  ;(error as any).code = code
+  error.code = code
 
   return error
 }
 
-function rejectUnsafePathSyntax(filePath, purpose = 'File read') {
+function rejectUnsafePathSyntax(filePath: unknown, purpose = 'File read'): string {
   if (typeof filePath !== 'string') {
     throw ipcPathError('invalid-path', `${purpose} failed: file path is required.`)
   }
@@ -147,7 +181,10 @@ function rejectUnsafePathSyntax(filePath, purpose = 'File read') {
   return raw
 }
 
-function resolveRequestedPathForIpc(filePath, options: { purpose?: string; baseDir?: fs.PathOrFileDescriptor } = {}) {
+function resolveRequestedPathForIpc(
+  filePath: unknown,
+  options: { purpose?: string | undefined; baseDir?: fs.PathOrFileDescriptor | undefined } = {}
+): string {
   const purpose = String(options.purpose || 'File read')
   let raw = rejectUnsafePathSyntax(filePath, purpose)
 
@@ -159,7 +196,7 @@ function resolveRequestedPathForIpc(filePath, options: { purpose?: string; baseD
   }
 
   if (/^file:/i.test(raw)) {
-    let resolvedPath
+    let resolvedPath: string
 
     try {
       const parsed = new URL(raw)
@@ -188,24 +225,32 @@ function resolveRequestedPathForIpc(filePath, options: { purpose?: string; baseD
   return resolvedPath
 }
 
-async function statForIpc(fsImpl: { promises: { stat: typeof fs.promises.stat } }, resolvedPath, purpose, typeLabel) {
+async function statForIpc<TStat>(
+  fsImpl: { promises: { stat?: ((statPath: string) => Promise<TStat>) | undefined } },
+  resolvedPath: string,
+  purpose: string,
+  typeLabel: string
+): Promise<TStat> {
   try {
-    return await fsImpl.promises.stat(resolvedPath)
+    // A stub without `stat` throws here; the catch below reports it the same
+    // way it reports any other stat failure.
+    return await fsImpl.promises.stat!(resolvedPath)
   } catch (error) {
-    const code = error && typeof error === 'object' ? error.code : ''
+    const code = errorCode(error)
 
     if (code === 'ENOENT' || code === 'ENOTDIR') {
       throw ipcPathError(code || 'ENOENT', `${purpose} failed: ${typeLabel} does not exist.`)
     }
 
-    throw ipcPathError(
-      code || 'read-error',
-      `${purpose} failed: ${error instanceof Error ? error.message : String(error)}`
-    )
+    throw ipcPathError(code || 'read-error', `${purpose} failed: ${errorMessage(error)}`)
   }
 }
 
-async function realpathForIpc(fsImpl, resolvedPath, purpose) {
+async function realpathForIpc(
+  fsImpl: { promises: { realpath?: ((statPath: string) => Promise<string>) | undefined } },
+  resolvedPath: string,
+  purpose: string
+): Promise<string> {
   if (typeof fsImpl.promises.realpath !== 'function') {
     return resolvedPath
   }
@@ -216,15 +261,12 @@ async function realpathForIpc(fsImpl, resolvedPath, purpose) {
 
     return realPath
   } catch (error) {
-    const code = error && typeof error === 'object' ? error.code : ''
-    throw ipcPathError(
-      code || 'read-error',
-      `${purpose} failed: ${error instanceof Error ? error.message : String(error)}`
-    )
+    const code = errorCode(error)
+    throw ipcPathError(code || 'read-error', `${purpose} failed: ${errorMessage(error)}`)
   }
 }
 
-function rejectSensitiveFilePath(filePath, purpose) {
+function rejectSensitiveFilePath(filePath: unknown, purpose: string): void {
   const blockReason = sensitiveFileBlockReason(filePath)
 
   if (blockReason) {
@@ -233,17 +275,17 @@ function rejectSensitiveFilePath(filePath, purpose) {
 }
 
 async function resolveDirectoryForIpc(
-  dirPath,
+  dirPath: unknown,
   options: {
-    purpose?: string
-    baseDir?: fs.PathOrFileDescriptor
-    fs?: { promises: { stat: typeof fs.promises.stat } }
+    purpose?: string | undefined
+    baseDir?: fs.PathOrFileDescriptor | undefined
+    fs?: IpcDirFs | undefined
   } = {}
-) {
+): Promise<{ realPath: string; resolvedPath: string; stat: IpcDirStat }> {
   const purpose = String(options.purpose || 'Directory read')
   const fsImpl = options.fs || fs
   const resolvedPath = resolveRequestedPathForIpc(dirPath, { baseDir: options.baseDir, purpose })
-  const stat = await statForIpc(fsImpl, resolvedPath, purpose, 'directory')
+  const stat = await statForIpc<IpcDirStat>(fsImpl, resolvedPath, purpose, 'directory')
 
   if (!stat.isDirectory()) {
     throw ipcPathError('ENOTDIR', `${purpose} failed: path is not a directory.`)
@@ -255,15 +297,15 @@ async function resolveDirectoryForIpc(
 }
 
 async function resolveReadableFileForIpc(
-  filePath,
+  filePath: unknown,
   options: {
-    purpose?: string
-    baseDir?: fs.PathOrFileDescriptor
-    fs?: typeof fs
-    blockSensitive?: boolean
-    maxBytes?: number
+    purpose?: string | undefined
+    baseDir?: fs.PathOrFileDescriptor | undefined
+    fs?: typeof fs | undefined
+    blockSensitive?: boolean | undefined
+    maxBytes?: number | undefined
   } = {}
-) {
+): Promise<{ realPath: string; resolvedPath: string; stat: fs.Stats }> {
   const purpose = String(options.purpose || 'File read')
   const fsImpl = options.fs || fs
   const resolvedPath = resolveRequestedPathForIpc(filePath, { baseDir: options.baseDir, purpose })
@@ -272,7 +314,7 @@ async function resolveReadableFileForIpc(
     rejectSensitiveFilePath(resolvedPath, purpose)
   }
 
-  const stat = await statForIpc(fsImpl, resolvedPath, purpose, 'file')
+  const stat = await statForIpc<fs.Stats>(fsImpl, resolvedPath, purpose, 'file')
 
   if (stat.isDirectory()) {
     throw ipcPathError('EISDIR', `${purpose} failed: path points to a directory.`)

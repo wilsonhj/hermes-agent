@@ -80,7 +80,8 @@ async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<v
     while (cursor < items.length) {
       const index = cursor
       cursor += 1
-      await fn(items[index])
+      // `index < items.length` was just checked, so the element exists.
+      await fn(items[index]!)
     }
   }
 

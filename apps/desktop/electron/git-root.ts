@@ -3,7 +3,7 @@ import path from 'node:path'
 
 import { resolveRequestedPathForIpc } from './hardening'
 
-function findGitRoot(start, fsImpl = fs) {
+function findGitRoot(start: string, fsImpl: { existsSync: (checkPath: string) => boolean } = fs): null | string {
   let dir = start
 
   for (let i = 0; i < 50; i += 1) {
@@ -27,9 +27,9 @@ function findGitRoot(start, fsImpl = fs) {
   return null
 }
 
-async function gitRootForIpc(startPath, options: { fs?: typeof fs } = {}) {
+async function gitRootForIpc(startPath: unknown, options: { fs?: typeof fs | undefined } = {}): Promise<null | string> {
   const fsImpl = options.fs || fs
-  let resolved
+  let resolved: string
 
   try {
     resolved = resolveRequestedPathForIpc(startPath, { purpose: 'Git root' })

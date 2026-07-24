@@ -104,8 +104,10 @@ export function wslPosixToWindowsAccessible(posixPath: string, distro: string = 
 
   if (mount) {
     const tail = (mount[2] || '').replace(/\//g, '\\')
+    // WSL_MOUNT_RE's first group is not optional, so a match always has it.
+    const drive = mount[1]!.toUpperCase()
 
-    return tail ? `${mount[1].toUpperCase()}:\\${tail}` : `${mount[1].toUpperCase()}:\\`
+    return tail ? `${drive}:\\${tail}` : `${drive}:\\`
   }
 
   const relative = normalized.replace(/^\/+/, '').replace(/\//g, '\\')
