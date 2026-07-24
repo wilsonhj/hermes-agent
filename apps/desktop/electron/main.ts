@@ -79,6 +79,7 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
+import { isExternallyOpenablePath } from './external-open'
 import { readDirForIpc } from './fs-read-dir'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { scanGitRepos } from './git-repo-scan'
@@ -1213,6 +1214,32 @@ function openExternalUrl(rawUrl) {
       localPath = resolveRequestedPathForIpc(parsed.toString(), { purpose: 'Open external file' })
     } catch {
       return false
+    }
+
+    // `shell.openPath` runs whatever the OS associates with the extension, and
+    // this call is reachable from model output (a `#media:` markdown link), so
+    // only documents/media go through it. Anything else — notably `.command` /
+    // `.bat` / `.sh`, including the `report.pdf.command` disguise — is revealed
+    // in the file manager instead: still useful, never executing. See
+    // external-open.ts.
+    let isDirectory = false
+
+    try {
+      isDirectory = fs.statSync(localPath).isDirectory()
+    } catch {
+      isDirectory = false
+    }
+
+    if (!isExternallyOpenablePath(localPath, { isDirectory })) {
+      rememberLog(`[file] refusing to open ${path.extname(localPath) || '(no extension)'}; revealing in folder instead`)
+
+      try {
+        shell.showItemInFolder(localPath)
+      } catch (revealError) {
+        rememberLog(`[file] showItemInFolder failed: ${revealError.message}`)
+      }
+
+      return true
     }
 
     void shell
@@ -9987,10 +10014,17 @@ ipcMain.handle('hermes:fs:rename', async (_event, targetPath, newName) => {
   return { path: dst }
 })
 
-// Write a small UTF-8 text file (e.g. a project's IDEA.md at creation). The path
-// is hardened (resolveRequestedPathForIpc) and the parent must already exist —
-// this never creates directory trees or escapes the allowed roots, and content
-// is size-capped so it can't be abused as a bulk-write primitive.
+// Write a small UTF-8 text file (e.g. a project's IDEA.md at creation).
+//
+// What actually constrains this, precisely: `resolveRequestedPathForIpc` does
+// PATH SYNTAX hardening only — it rejects NUL bytes and Windows device paths,
+// expands `~`, and parses `file:` URLs. It does NOT confine the result to any
+// root, and it does NOT apply the sensitive-file blocklist (that lives in
+// `resolveReadableFileForIpc`, on the read side). So the real limits here are:
+// the parent directory must already exist (no directory trees get created), and
+// content is size-capped so this can't be abused as a bulk-write primitive.
+// An absolute path outside the workspace IS writable — adding confinement is a
+// deliberate design change, not something this comment should imply is done.
 ipcMain.handle('hermes:fs:writeText', async (_event, filePath, content) => {
   const raw = String(filePath || '').trim()
 
