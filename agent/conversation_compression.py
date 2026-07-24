@@ -105,12 +105,25 @@ COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE = (
 COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE = (
     "🗜️ Context reduced to {new_ctx:,} tokens (was {old_ctx:,}), retrying..."
 )
+# The 413 overflow retry announcement that precedes the "Compressed X → Y,
+# retrying..." lines above. ⚠️-prefixed, but routine: it is the opening beat of
+# the same buffered retry trace (like the auto-lower notice and the
+# concurrent-compression skip, which are ⚠-prefixed and suppressed too), and
+# the TERMINAL 413 failures go out through _vprint/final_response instead.
+COMPRESSION_RETRY_PAYLOAD_TOO_LARGE_STATUS_TEMPLATE = (
+    "⚠️  Request payload too large (413) — compression attempt {attempt}/{cap}..."
+)
+COMPRESSION_RETRY_VISION_STRIPPED_STATUS = (
+    "📐 Compression could not reduce the request further — "
+    "removed retained vision payloads and retrying..."
+)
 
 # Sample-formatted instances of every routine compression status line, for
 # behavioral tests that iterate the ACTUAL emitted wording (formatted from the
 # same constants the emission sites use) through the gateway noise filter.
 ROUTINE_COMPRESSION_STATUS_SAMPLES = (
     COMPACTION_STATUS,
+    COMPACTION_DONE_STATUS,
     PRE_API_COMPRESSION_STATUS_TEMPLATE.format(tokens=123456),
     PREFLIGHT_COMPRESSION_STATUS_TEMPLATE.format(tokens=120000, threshold=100000),
     IDLE_COMPACTION_STATUS_TEMPLATE.format(idle_seconds=3600, tokens=120000),
@@ -120,6 +133,8 @@ ROUTINE_COMPRESSION_STATUS_SAMPLES = (
     COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE.format(
         new_ctx=120000, old_ctx=250000
     ),
+    COMPRESSION_RETRY_PAYLOAD_TOO_LARGE_STATUS_TEMPLATE.format(attempt=1, cap=3),
+    COMPRESSION_RETRY_VISION_STRIPPED_STATUS,
 )
 
 

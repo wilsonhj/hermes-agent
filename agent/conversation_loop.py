@@ -31,8 +31,10 @@ from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.conversation_compression import (
     COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE,
     COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE,
+    COMPRESSION_RETRY_PAYLOAD_TOO_LARGE_STATUS_TEMPLATE,
     COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE,
     COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE,
+    COMPRESSION_RETRY_VISION_STRIPPED_STATUS,
     PRE_API_COMPRESSION_STATUS_TEMPLATE,
     conversation_history_after_compression,
 )
@@ -3744,7 +3746,7 @@ def run_conversation(
                             "failed": True,
                             "compression_exhausted": True,
                         }
-                    agent._buffer_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
+                    agent._buffer_status(COMPRESSION_RETRY_PAYLOAD_TOO_LARGE_STATUS_TEMPLATE.format(attempt=compression_attempts, cap=max_compression_attempts))
 
                     original_len = len(messages)
                     original_tokens = estimate_messages_tokens_rough(messages)
@@ -3776,10 +3778,7 @@ def run_conversation(
                             api_messages,
                             remember_model=False,
                         ):
-                            agent._buffer_status(
-                                "📐 Compression could not reduce the request further — "
-                                "removed retained vision payloads and retrying..."
-                            )
+                            agent._buffer_status(COMPRESSION_RETRY_VISION_STRIPPED_STATUS)
                             continue
 
                         # Terminal — surface buffered context so the user
