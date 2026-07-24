@@ -135,6 +135,7 @@ import {
   chatWindowWebPreferences,
   createSessionWindowRegistry,
   instanceWindowBounds,
+  sanitizeWebviewAttach,
   SESSION_WINDOW_MIN_HEIGHT,
   SESSION_WINDOW_MIN_WIDTH
 } from './session-windows'
@@ -10630,6 +10631,23 @@ if (!_gotSingleInstanceLock) {
     })
   })
 }
+
+// Chat windows enable `webviewTag` for the right-rail preview pane, so <webview>
+// attach is a renderer-reachable path into main-process privilege: the guest's
+// `preload` / `nodeintegration` attributes come from DOM the renderer wrote.
+// Registered app-wide (not per-window like wireCommonWindowHandlers) because
+// this must cover EVERY WebContents — including guests, and including any
+// future window that forgets the shared webPreferences. The scrub itself lives
+// in session-windows.ts next to the webviewTag that makes it necessary.
+// Registered before whenReady so no WebContents can be created ahead of it.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (event, webPreferences, params) => {
+    if (!sanitizeWebviewAttach(webPreferences, params)) {
+      rememberLog(`[security] blocked <webview> attach for disallowed src: ${params?.src ?? '(none)'}`)
+      event.preventDefault()
+    }
+  })
+})
 
 // macOS delivers deep links via 'open-url' — register early (can fire before
 // whenReady; handleDeepLink queues until the renderer is ready).
