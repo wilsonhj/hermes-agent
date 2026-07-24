@@ -9,8 +9,34 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import simpleGit from 'simple-git'
+import type { DiffResult, DiffResultTextFile, FileStatusResult, SimpleGit, StatusResult } from 'simple-git'
 
 import { resolveRequestedPathForIpc } from './hardening'
+
+// Path to the `git`/`gh` executable, resolved by the caller in the main
+// process. Null/undefined means "fall back to the PATH lookup".
+type BinPath = null | string | undefined
+
+// One row of the review tree / commit surface.
+interface ReviewFile {
+  path: string
+  added: number
+  removed: number
+  status: string
+  staged: boolean
+}
+
+interface LineCounts {
+  added: number
+  removed: number
+}
+
+// `gh pr view --json url,state,number`.
+interface PrSummary {
+  url: string
+  state: string
+  number: number
+}
 
 const COMMIT_CONTEXT_DIFF_MAX_CHARS = 120_000
 const COMMIT_CONTEXT_UNTRACKED_MAX = 80
@@ -21,7 +47,7 @@ const UNTRACKED_LINE_COUNT_MAX_BYTES = 1024 * 1024
 // /opt/homebrew/bin or /usr/local/bin), so `gh` — and the `git` gh shells out
 // to — aren't found. Augment PATH with the resolved gh dir + the common
 // package-manager bins so gh runs the same way it does in a terminal.
-function ghEnv(ghBin) {
+function ghEnv(ghBin: BinPath): NodeJS.ProcessEnv {
   const extra = [ghBin ? path.dirname(ghBin) : '', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'].filter(
     dir => dir && dir !== '.'
   )
@@ -31,7 +57,7 @@ function ghEnv(ghBin) {
 
 // Run the `gh` CLI in a repo. Resolves { ok, stdout } so callers branch on
 // availability/auth without a throw. gh missing/unauthed → ok:false.
-function runGh(args, cwd, ghBin): Promise<{ ok: boolean; stdout: string }> {
+function runGh(args: string[], cwd: string, ghBin: BinPath): Promise<{ ok: boolean; stdout: string }> {
   return new Promise(resolve => {
     execFile(
       ghBin || 'gh',
@@ -42,7 +68,7 @@ function runGh(args, cwd, ghBin): Promise<{ ok: boolean; stdout: string }> {
   })
 }
 
-function gitFor(cwd, gitBin) {
+function gitFor(cwd: string, gitBin: BinPath): SimpleGit {
   // `gitBin` is resolved inside the Electron main process from known install
   // locations or PATH — never renderer/user input. simple-git's custom-binary
   // validation rejects paths containing spaces (the default Windows install is
@@ -61,7 +87,7 @@ function gitFor(cwd, gitBin) {
 
 // simple-git reports renames as `old => new` (and `dir/{old => new}/f`); resolve
 // to the NEW path so the row addresses the real file for diff/stage.
-function resolveRenamePath(raw) {
+function resolveRenamePath(raw: unknown): string {
   const path = String(raw || '').trim()
 
   if (!path.includes(' => ')) {
@@ -76,18 +102,24 @@ function resolveRenamePath(raw) {
     return `${prefix}${to}${suffix}`.replace(/\/{2,}/g, '/')
   }
 
-  return path.split(' => ').pop().trim()
+  // `path` contains ' => ', so the split yields at least two segments.
+  return path.split(' => ').pop()!.trim()
 }
 
 // DiffResult.files → Map<path, {added, removed}> (binary files carry no line
 // delta).
-function countsByPath(summary) {
-  const map = new Map()
+function countsByPath(summary: DiffResult): Map<string, LineCounts> {
+  const map = new Map<string, LineCounts>()
 
   for (const file of summary.files) {
+    // `binary` discriminates the union, but the loose `tsconfig.electron.json`
+    // project doesn't narrow on it — read the line counts through the text
+    // shape, guarded by the same `file.binary` check as before.
+    const text = file as DiffResultTextFile
+
     map.set(resolveRenamePath(file.file), {
-      added: file.binary ? 0 : file.insertions,
-      removed: file.binary ? 0 : file.deletions
+      added: file.binary ? 0 : text.insertions,
+      removed: file.binary ? 0 : text.deletions
     })
   }
 
@@ -98,7 +130,7 @@ function countsByPath(summary) {
 // the review tree can show +N for new files (matches an all-add diff view).
 // Insertions = line count: newline bytes, plus one for a final unterminated
 // line. Binary (NUL byte) → 0, mirroring git numstat's "-".
-async function untrackedInsertions(cwd, relPath) {
+async function untrackedInsertions(cwd: string, relPath: string): Promise<number> {
   try {
     const fullPath = path.join(cwd, relPath)
     const stat = await fs.stat(fullPath)
@@ -127,7 +159,7 @@ async function untrackedInsertions(cwd, relPath) {
   }
 }
 
-function capText(text, maxChars, label = 'truncated') {
+function capText(text: unknown, maxChars: number, label = 'truncated'): string {
   const value = String(text || '')
 
   if (value.length <= maxChars) {
@@ -137,7 +169,7 @@ function capText(text, maxChars, label = 'truncated') {
   return `${value.slice(0, maxChars)}\n# ${label}: ${value.length - maxChars} chars omitted\n`
 }
 
-async function fillUntrackedCounts(cwd, files) {
+async function fillUntrackedCounts(cwd: string, files: ReviewFile[]): Promise<void> {
   const pending = files.filter(file => file.status === '?' && file.added === 0 && file.removed === 0)
 
   for (let i = 0; i < pending.length; i += UNTRACKED_LINE_COUNT_CONCURRENCY) {
@@ -151,8 +183,8 @@ async function fillUntrackedCounts(cwd, files) {
 
 // Resolve the base ref for "all branch changes": merge-base with the remote
 // default branch (origin/HEAD), falling back to common trunk names.
-async function branchBase(git) {
-  const candidates = []
+async function branchBase(git: SimpleGit): Promise<null | string> {
+  const candidates: string[] = []
 
   try {
     const head = (await git.revparse(['--abbrev-ref', 'origin/HEAD'])).trim()
@@ -185,7 +217,7 @@ async function branchBase(git) {
 // the remote's HEAD, then common local trunk names. Null when none is found
 // (e.g. a fresh repo with only a feature branch). Used to offer "branch off the
 // trunk" regardless of which branch you're currently on.
-async function defaultBranchName(git) {
+async function defaultBranchName(git: SimpleGit): Promise<null | string> {
   try {
     const head = (await git.revparse(['--abbrev-ref', 'origin/HEAD'])).trim()
 
@@ -219,7 +251,7 @@ async function defaultBranchName(git) {
 
 // A status file's single-letter classification, preferring the staged (index)
 // code over the worktree code; untracked wins (simple-git marks both '?').
-function statusLetter(file) {
+function statusLetter(file: FileStatusResult): string {
   if (file.index === '?' || file.working_dir === '?') {
     return '?'
   }
@@ -229,10 +261,15 @@ function statusLetter(file) {
   return (code || 'M').toUpperCase()
 }
 
-const isStaged = file => Boolean(file.index && file.index !== ' ' && file.index !== '?')
+const isStaged = (file: FileStatusResult) => Boolean(file.index && file.index !== ' ' && file.index !== '?')
 
-async function reviewList(repoPath, scope, baseRef, gitBin) {
-  let cwd
+async function reviewList(
+  repoPath: unknown,
+  scope: string,
+  baseRef: null | string | undefined,
+  gitBin: BinPath
+): Promise<{ files: ReviewFile[]; base: null | string }> {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review list' })
@@ -311,8 +348,15 @@ async function reviewList(repoPath, scope, baseRef, gitBin) {
   }
 }
 
-async function reviewDiff(repoPath, filePath, scope, baseRef, staged, gitBin) {
-  let cwd
+async function reviewDiff(
+  repoPath: unknown,
+  filePath: string,
+  scope: string,
+  baseRef: null | string | undefined,
+  staged: boolean,
+  gitBin: BinPath
+): Promise<string> {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review diff' })
@@ -321,7 +365,7 @@ async function reviewDiff(repoPath, filePath, scope, baseRef, staged, gitBin) {
   }
 
   const git = gitFor(cwd, gitBin)
-  const safe = args => git.diff(args).catch(() => '')
+  const safe = (args: string[]) => git.diff(args).catch(() => '')
 
   if (scope === 'branch') {
     const base = await branchBase(git)
@@ -360,8 +404,8 @@ async function reviewDiff(repoPath, filePath, scope, baseRef, staged, gitBin) {
 // commit" view used by the file preview. Unlike reviewDiff this never synthesizes
 // a full-add for a clean tracked file (so a pristine file shows no diff); it only
 // all-adds a genuinely untracked file.
-async function fileDiffVsHead(repoPath, filePath, gitBin) {
-  let cwd
+async function fileDiffVsHead(repoPath: unknown, filePath: string, gitBin: BinPath): Promise<string> {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'File diff' })
@@ -394,7 +438,7 @@ async function fileDiffVsHead(repoPath, filePath, gitBin) {
   })
 }
 
-async function reviewStage(repoPath, filePath, gitBin) {
+async function reviewStage(repoPath: unknown, filePath: null | string, gitBin: BinPath): Promise<{ ok: boolean }> {
   const cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review stage' })
 
   await gitFor(cwd, gitBin).raw(filePath ? ['add', '--', filePath] : ['add', '-A'])
@@ -402,7 +446,7 @@ async function reviewStage(repoPath, filePath, gitBin) {
   return { ok: true }
 }
 
-async function reviewUnstage(repoPath, filePath, gitBin) {
+async function reviewUnstage(repoPath: unknown, filePath: null | string, gitBin: BinPath): Promise<{ ok: boolean }> {
   const cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review unstage' })
 
   await gitFor(cwd, gitBin).raw(filePath ? ['reset', '-q', 'HEAD', '--', filePath] : ['reset', '-q', 'HEAD'])
@@ -412,7 +456,7 @@ async function reviewUnstage(repoPath, filePath, gitBin) {
 
 // Discard changes back to the committed state. Destructive — the renderer
 // confirms first. Restores tracked files and removes untracked ones.
-async function reviewRevert(repoPath, filePath, gitBin) {
+async function reviewRevert(repoPath: unknown, filePath: null | string, gitBin: BinPath): Promise<{ ok: boolean }> {
   const cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review revert' })
   const git = gitFor(cwd, gitBin)
 
@@ -428,8 +472,12 @@ async function reviewRevert(repoPath, filePath, gitBin) {
 }
 
 // Resolve a ref to a commit sha (captures the turn baseline for "Last turn").
-async function reviewRevParse(repoPath, ref, gitBin) {
-  let cwd
+async function reviewRevParse(
+  repoPath: unknown,
+  ref: null | string | undefined,
+  gitBin: BinPath
+): Promise<null | string> {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review rev-parse' })
@@ -447,7 +495,12 @@ async function reviewRevParse(repoPath, ref, gitBin) {
 // Commit the working tree. Mirrors VS Code: if nothing is staged, stage
 // everything first ("commit all"), then commit. Optionally push afterward,
 // setting upstream on the first push.
-async function reviewCommit(repoPath, message, push, gitBin) {
+async function reviewCommit(
+  repoPath: unknown,
+  message: string,
+  push: boolean,
+  gitBin: BinPath
+): Promise<{ ok: boolean }> {
   const cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review commit' })
   const git = gitFor(cwd, gitBin)
   const status = await git.status()
@@ -476,8 +529,8 @@ async function reviewCommit(repoPath, message, push, gitBin) {
 // vs HEAD — mirroring reviewCommit's "stage all when nothing staged" rule),
 // the names of untracked files (which carry no diff), and recent commit
 // subjects for style. Diff is capped so the payload stays bounded. Reads only.
-async function reviewCommitContext(repoPath, gitBin) {
-  let cwd
+async function reviewCommitContext(repoPath: unknown, gitBin: BinPath): Promise<{ diff: string; recent: string }> {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review commit context' })
@@ -486,9 +539,9 @@ async function reviewCommitContext(repoPath, gitBin) {
   }
 
   const git = gitFor(cwd, gitBin)
-  const safe = args => git.diff(args).catch(() => '')
+  const safe = (args: string[]) => git.diff(args).catch(() => '')
 
-  let status
+  let status: StatusResult
 
   try {
     status = await git.status()
@@ -522,7 +575,7 @@ async function reviewCommitContext(repoPath, gitBin) {
   return { diff: diff || '', recent: String(recent || '').trim() }
 }
 
-async function reviewPush(repoPath, gitBin) {
+async function reviewPush(repoPath: unknown, gitBin: BinPath): Promise<{ ok: boolean }> {
   const cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review push' })
   const git = gitFor(cwd, gitBin)
   const status = await git.status()
@@ -539,8 +592,8 @@ async function reviewPush(repoPath, gitBin) {
 // gh availability + auth + whether this branch already has a PR. Reads only;
 // drives the PR button's enabled/label state. `ghReady` is false when gh is
 // missing OR not authenticated — either way the PR action can't run.
-async function reviewShipInfo(repoPath, ghBin) {
-  let cwd
+async function reviewShipInfo(repoPath: unknown, ghBin: BinPath): Promise<{ ghReady: boolean; pr: null | PrSummary }> {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review ship info' })
@@ -562,7 +615,10 @@ async function reviewShipInfo(repoPath, ghBin) {
   }
 
   try {
-    const pr = JSON.parse(view.stdout)
+    // The fields were requested explicitly on the gh command line above, so a
+    // successful parse carries them; a malformed payload falls through to the
+    // `pr.url` check exactly as before.
+    const pr = JSON.parse(view.stdout) as null | PrSummary
 
     return { ghReady: true, pr: pr && pr.url ? { url: pr.url, state: pr.state, number: pr.number } : null }
   } catch {
@@ -572,7 +628,7 @@ async function reviewShipInfo(repoPath, ghBin) {
 
 // Create a PR for the current branch (pushing first so gh has a remote ref),
 // letting gh fill title/body from the commits. Returns the new PR url.
-async function reviewCreatePr(repoPath, gitBin, ghBin) {
+async function reviewCreatePr(repoPath: unknown, gitBin: BinPath, ghBin: BinPath): Promise<{ url: string }> {
   const cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Review create PR' })
 
   await reviewPush(repoPath, gitBin).catch(() => undefined)
@@ -590,8 +646,8 @@ async function reviewCreatePr(repoPath, gitBin, ghBin) {
 
 // Compact working-tree status for the composer coding rail: branch, ahead/behind,
 // per-state change counts, +/- vs HEAD, and a capped changed-file list.
-async function repoStatus(repoPath, gitBin) {
-  let cwd
+async function repoStatus(repoPath: unknown, gitBin: BinPath) {
+  let cwd: string
 
   try {
     cwd = resolveRequestedPathForIpc(repoPath, { purpose: 'Repo status' })
@@ -612,7 +668,7 @@ async function repoStatus(repoPath, gitBin) {
     return null
   }
 
-  let git
+  let git: SimpleGit
 
   try {
     git = gitFor(cwd, gitBin)
@@ -620,7 +676,7 @@ async function repoStatus(repoPath, gitBin) {
     return null
   }
 
-  let status
+  let status: StatusResult
 
   try {
     // The coding rail needs compact change truth, not every generated file.

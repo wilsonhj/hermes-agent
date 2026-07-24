@@ -1,0 +1,36 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "noImplicitThis": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "alwaysStrict": true,
+    "strictPropertyInitialization": true,
+    "strictBuiltinIteratorReturn": true,
+    "useUnknownInCatchVariables": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "ignoreDeprecations": "6.0",
+    "composite": false,
+    "declaration": false,
+    "noEmit": true,
+    "outDir": "build/electron-types-strict",
+    "tsBuildInfoFile": "build/electron-types-strict/tsconfig.electron.strict.tsbuildinfo"
+  },
+  "references": [],
+  "include": [
+    "electron/error-narrowing.ts",
+    "electron/hardening.ts",
+    "electron/fs-read-dir.ts",
+    "electron/git-root.ts",
+    "electron/git-repo-scan.ts",
+    "electron/git-review-ops.ts",
+    "electron/git-worktree-ops.ts",
+    "electron/spawn-helper-perms.ts",
+    "electron/wsl-path-bridge.ts"
+  ],
+  "exclude": []
+}
