@@ -245,7 +245,26 @@ def recover_abandoned_delegations() -> int:
                     live = get_process_start_time(int(pid)) == int(started)
             if live:
                 continue
-            task = json.loads(task_json or "{}")
+            # Per-row isolation: a single unreadable payload (crash mid-write,
+            # manual DB edit, schema drift) must not abort recovery for every
+            # OTHER abandoned delegation. Worse, this loop's UPDATEs share one
+            # transaction, so an escaping exception rolls back the rows already
+            # recovered in this pass — one bad row used to mean zero recovered.
+            try:
+                task = json.loads(task_json or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.warning(
+                    "Async delegation %s: unreadable task_json in durable row; "
+                    "recovering with an empty task spec.", delegation_id,
+                )
+                task = {}
+            if not isinstance(task, dict):
+                logger.warning(
+                    "Async delegation %s: task_json is %s, not an object; "
+                    "recovering with an empty task spec.",
+                    delegation_id, type(task).__name__,
+                )
+                task = {}
             event = {
                 "type": "async_delegation", "delegation_id": delegation_id,
                 "session_key": session_key, "origin_ui_session_id": origin_ui,
@@ -287,12 +306,39 @@ def restore_undelivered_completions(target_queue) -> int:
                WHERE state != 'running' AND delivery_state='pending' AND event_json IS NOT NULL
                ORDER BY completed_at, delegation_id"""
         ).fetchall()
-        for _delegation_id, payload in rows:
-            evt = json.loads(payload)
-            if isinstance(evt, dict):
-                evt["restored"] = True
+        restored = 0
+        for delegation_id, payload in rows:
+            # Per-row isolation: one corrupt payload must not abort restoration
+            # of every other session's pending result. An unparseable (or
+            # non-object) event_json can never be delivered, so it converges to
+            # the same terminal 'dropped' state an exhausted delivery budget
+            # uses — otherwise it aborts the restore on EVERY boot forever.
+            # The row itself is left in place and stays queryable.
+            try:
+                evt = json.loads(payload)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                evt = None
+                reason = f"unparseable event_json ({exc})"
+            else:
+                reason = f"event_json is {type(evt).__name__}, not an object"
+            if not isinstance(evt, dict):
+                logger.error(
+                    "Async delegation %s: %s; marking terminally dropped and "
+                    "skipping restore (result is unrecoverable, row retained).",
+                    delegation_id, reason,
+                )
+                conn.execute(
+                    """UPDATE async_delegations SET delivery_state='dropped',
+                              updated_at=?, delivery_claim=NULL,
+                              delivery_claimed_at=NULL
+                       WHERE delegation_id=? AND delivery_state='pending'""",
+                    (time.time(), delegation_id),
+                )
+                continue
+            evt["restored"] = True
             target_queue.put(evt)
-    return len(rows)
+            restored += 1
+    return restored
 
 
 def mark_completion_delivered(delegation_id: str) -> bool:
@@ -430,10 +476,21 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
         ).fetchone()
     if row is None:
         return None
+    result = None
+    if row[4]:
+        # Same isolation as the recovery loops: a corrupt result payload must
+        # degrade this row to result=None, not raise out of a status query.
+        try:
+            result = json.loads(row[4])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logger.warning(
+                "Async delegation %s: unreadable result_json in durable row; "
+                "reporting result=None.", delegation_id,
+            )
     return {
         "delegation_id": delegation_id, "origin_session": row[0], "state": row[1],
         "dispatched_at": row[2], "completed_at": row[3],
-        "result": json.loads(row[4]) if row[4] else None,
+        "result": result,
         "delivery_state": row[5], "delivery_attempts": row[6],
     }
 
