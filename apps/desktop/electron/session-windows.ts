@@ -21,6 +21,11 @@ const SESSION_WINDOW_MIN_HEIGHT = 620
 // blurred/occluded windows. A streaming chat app must keep painting in the
 // background, so every chat window opts out. The preload path is injected
 // because it depends on the Electron entry's __dirname.
+//
+// `webviewTag: true` is also load-bearing: the right-rail preview pane mounts a
+// <webview> (src/app/chat/right-rail/preview-pane.tsx) to render dev-server URLs
+// and local HTML out-of-process. It is NOT free, though — see
+// sanitizeWebviewAttach below, which every attach must go through.
 function chatWindowWebPreferences(preloadPath: string) {
   return {
     preload: preloadPath,
@@ -31,6 +36,60 @@ function chatWindowWebPreferences(preloadPath: string) {
     devTools: true,
     backgroundThrottling: false
   }
+}
+
+// A <webview> is renderer-authored markup, and its `preload` / `nodeintegration`
+// attributes are honoured by the MAIN process, not the renderer. So the chat
+// window's own hardening (contextIsolation + sandbox + nodeIntegration:false)
+// buys nothing on its own: anything that can inject DOM into the transcript —
+// a malicious tool result, a prompt-injected model response, an XSS in rendered
+// markdown — could attach a guest with Node enabled, or point one at our preload
+// and inherit the whole desktop bridge (terminal spawn, fs read/write, git,
+// openExternal). Every attach is therefore scrubbed in the main process, where
+// the renderer can't reach it.
+//
+// The preview pane only ever loads http(s) dev servers or `file://` HTML
+// (src/lib/local-preview.ts builds both), so anything else — `javascript:`,
+// `data:`, a custom protocol — is a guest we never meant to open.
+const WEBVIEW_ALLOWED_PROTOCOLS = new Set(['file:', 'http:', 'https:'])
+
+function isAllowedWebviewSrc(src) {
+  if (typeof src !== 'string' || !src.trim()) {
+    return false
+  }
+
+  try {
+    return WEBVIEW_ALLOWED_PROTOCOLS.has(new URL(src).protocol)
+  } catch {
+    return false
+  }
+}
+
+// Scrub a pending <webview> attach. Electron reads `webPreferences`/`params`
+// back after the will-attach-webview handler returns, so this mutates them in
+// place; the return value says whether the attach may proceed at all. Node
+// access is stripped unconditionally rather than only for rejected sources, so
+// an allowed-looking src still can't smuggle in the preload bridge.
+function sanitizeWebviewAttach(webPreferences: any = {}, params: any = {}) {
+  delete webPreferences.preload
+  delete webPreferences.preloadURL
+  webPreferences.nodeIntegration = false
+  webPreferences.nodeIntegrationInSubFrames = false
+  webPreferences.nodeIntegrationInWorker = false
+  webPreferences.contextIsolation = true
+  webPreferences.sandbox = true
+  webPreferences.webSecurity = true
+
+  // The element attributes are what Electron re-parses for the guest, so the
+  // Node-granting ones have to go too — clearing webPreferences alone is not
+  // enough. `allowpopups` goes because a guest popup is a fresh WebContents we
+  // never asked for.
+  delete params.preload
+  delete params.nodeintegration
+  delete params.nodeintegrationinsubframes
+  delete params.allowpopups
+
+  return isAllowedWebviewSrc(params.src)
 }
 
 // Build the renderer URL for a secondary window. The renderer uses a
@@ -141,6 +200,8 @@ export {
   chatWindowWebPreferences,
   createSessionWindowRegistry,
   instanceWindowBounds,
+  isAllowedWebviewSrc,
+  sanitizeWebviewAttach,
   SESSION_WINDOW_MIN_HEIGHT,
   SESSION_WINDOW_MIN_WIDTH
 }

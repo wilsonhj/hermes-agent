@@ -16,6 +16,8 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 
+import { errorMessage } from './error-narrowing'
+
 const EXEC_BITS = 0o111
 
 export interface SpawnHelperFs {
@@ -67,10 +69,6 @@ export function spawnHelperCandidates(
   candidates.push(join(nodePtyRoot, 'build', 'Release', 'spawn-helper'))
 
   return candidates
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 // Best-effort: ensure every existing spawn-helper under `nodePtyRoot` is

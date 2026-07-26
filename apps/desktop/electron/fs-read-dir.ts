@@ -1,8 +1,37 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { errorCode } from './error-narrowing'
 import { resolveDirectoryForIpc } from './hardening'
 import { resolveLocalReadPath } from './wsl-path-bridge'
+
+// The dirent shape this module relies on. `isDirectory`/`isFile`/
+// `isSymbolicLink` are optional because every use site probes with
+// `typeof … === 'function'` first — injected stubs need not supply them.
+interface ReadDirDirent {
+  name: string
+  isDirectory?: () => boolean
+  isFile?: () => boolean
+  isSymbolicLink?: () => boolean
+}
+
+interface ReadDirEntry {
+  name: string
+  path: string
+  isDirectory: boolean
+}
+
+// The `node:fs` slice this module reaches for. `realpath`/`stat` are optional
+// because callers legitimately inject partial stubs covering only the code path
+// they exercise; a missing member throws inside an existing try/catch and is
+// reported as a read-error, exactly as before.
+interface ReadDirFs {
+  promises: {
+    readdir: (dirPath: string, options: { withFileTypes: true }) => Promise<ReadDirDirent[]>
+    realpath?: ((statPath: string) => Promise<string>) | undefined
+    stat?: ((statPath: string) => Promise<{ isDirectory: () => boolean }>) | undefined
+  }
+}
 
 const FS_READDIR_STAT_CONCURRENCY = 16
 
@@ -24,19 +53,19 @@ const FS_READDIR_HIDDEN = new Set([
   'venv'
 ])
 
-function direntIsDirectory(dirent) {
+function direntIsDirectory(dirent: ReadDirDirent): boolean {
   return typeof dirent.isDirectory === 'function' && dirent.isDirectory()
 }
 
-function direntIsFile(dirent) {
+function direntIsFile(dirent: ReadDirDirent): boolean {
   return typeof dirent.isFile === 'function' && dirent.isFile()
 }
 
-function direntIsSymbolicLink(dirent) {
+function direntIsSymbolicLink(dirent: ReadDirDirent): boolean {
   return typeof dirent.isSymbolicLink === 'function' && dirent.isSymbolicLink()
 }
 
-function shouldStatDirent(dirent) {
+function shouldStatDirent(dirent: ReadDirDirent): boolean {
   if (direntIsDirectory(dirent)) {
     return false
   }
@@ -44,13 +73,15 @@ function shouldStatDirent(dirent) {
   return direntIsSymbolicLink(dirent) || !direntIsFile(dirent)
 }
 
-async function entryForDirent(dirent, resolved, fsImpl) {
+async function entryForDirent(dirent: ReadDirDirent, resolved: string, fsImpl: ReadDirFs): Promise<ReadDirEntry> {
   const fullPath = path.join(resolved, dirent.name)
   let isDirectory = direntIsDirectory(dirent)
 
   if (!isDirectory && shouldStatDirent(dirent)) {
     try {
-      isDirectory = (await fsImpl.promises.stat(fullPath)).isDirectory()
+      // A stub without `stat` throws here and falls through to the catch, the
+      // same as any other stat failure.
+      isDirectory = (await fsImpl.promises.stat!(fullPath)).isDirectory()
     } catch {
       isDirectory = false
     }
@@ -59,15 +90,19 @@ async function entryForDirent(dirent, resolved, fsImpl) {
   return { name: dirent.name, path: fullPath, isDirectory }
 }
 
-async function mapWithStatConcurrency(items, mapper) {
-  const results = new Array(items.length)
+async function mapWithStatConcurrency<Item, Result>(
+  items: Item[],
+  mapper: (item: Item) => Promise<Result>
+): Promise<Result[]> {
+  const results = new Array<Result>(items.length)
   let nextIndex = 0
 
-  async function runWorker() {
+  async function runWorker(): Promise<void> {
     while (nextIndex < items.length) {
       const index = nextIndex
       nextIndex += 1
-      results[index] = await mapper(items[index])
+      // `index < items.length` was just checked, so the element exists.
+      results[index] = await mapper(items[index]!)
     }
   }
 
@@ -78,9 +113,12 @@ async function mapWithStatConcurrency(items, mapper) {
   return results
 }
 
-async function readDirForIpc(dirPath, options: any = {}) {
-  const fsImpl = options.fs || fs
-  let resolved
+async function readDirForIpc(
+  dirPath: unknown,
+  options: { fs?: ReadDirFs | undefined } = {}
+): Promise<{ entries: ReadDirEntry[]; error?: string }> {
+  const fsImpl: ReadDirFs = options.fs || fs
+  let resolved: string
 
   // On a Windows host with a WSL backend, a WSL/POSIX cwd (`/home/...`,
   // `/mnt/c/...`) isn't readable as-is; bridge it to a UNC/drive form first.
@@ -92,7 +130,7 @@ async function readDirForIpc(dirPath, options: any = {}) {
       purpose: 'Directory read'
     }))
   } catch (error) {
-    return { entries: [], error: error?.code || 'read-error' }
+    return { entries: [], error: errorCode(error) || 'read-error' }
   }
 
   try {
@@ -104,7 +142,7 @@ async function readDirForIpc(dirPath, options: any = {}) {
 
     return { entries }
   } catch (error) {
-    return { entries: [], error: error?.code || 'read-error' }
+    return { entries: [], error: errorCode(error) || 'read-error' }
   }
 }
 

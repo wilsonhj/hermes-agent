@@ -62,6 +62,15 @@ NOISY_STATUS_MESSAGES = [
         "⚠ Skipping concurrent compression — another path is already "
         "compressing this session. Will retry after it finishes."
     ),
+    # The 413 overflow beat that OPENS the buffered retry trace above, its
+    # vision-payload-strip sibling, and the compaction terminal edge. All
+    # ⚠️/📐/✓-prefixed yet routine — the glyph is not a carve-out signal.
+    "⚠️  Request payload too large (413) — compression attempt 1/3...",
+    (
+        "📐 Compression could not reduce the request further — removed "
+        "retained vision payloads and retrying..."
+    ),
+    "✓ Context compaction complete — continuing turn...",
 ]
 
 # Messages that must NEVER be swallowed by the compression-noise filter:
@@ -82,6 +91,12 @@ VISIBLE_COMPRESSION_MESSAGES = [
         "⚠ Compression returned an empty transcript. No session split was "
         "performed; conversation continues unchanged."
     ),
+    # Terminal 413 give-up notices. The routine "(413) — compression attempt
+    # N/M" alternative must stay anchored tightly enough that these — which
+    # tell the user to run /new or /compress — still get through.
+    "❌ Max compression attempts (3) reached for payload-too-large error.",
+    "Request payload too large: max compression attempts (3) reached.",
+    "❌ Payload too large and cannot compress further.",
 ]
 
 

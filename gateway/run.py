@@ -96,6 +96,14 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"|compressed\s+\d[\d,]*\s+(?:→|->)\s+\d[\d,]*\s+messages,\s+retrying"
     r"|compressed\s+~[\d,]+\s+(?:→|->)\s+~[\d,]+\s+tokens,\s+retrying"
     r"|context\s+reduced\s+to\s+[\d,]+\s+tokens\s+\(was\s+[\d,]+\),\s+retrying"
+    # The 413 overflow announcement that OPENS the retry trace above, plus the
+    # vision-payload-strip retry and the compaction terminal edge. Anchored on
+    # the literal "(413)" + "compression attempt" so the TERMINAL notice
+    # ("Request payload too large: max compression attempts (3) reached.")
+    # still reaches the user.
+    r"|request\s+payload\s+too\s+large\s+\(413\)\s+[—-]+\s+compression\s+attempt\s+\d"
+    r"|compression\s+could\s+not\s+reduce\s+the\s+request\s+further"
+    r"|context\s+compaction\s+complete"
     r"|session\s+compressed\s+\d+\s+times"
     r"|rate\s+limited\.\s+waiting\s+\d"
     r"|retrying\s+in\s+\d"

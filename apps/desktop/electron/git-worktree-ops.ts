@@ -8,7 +8,27 @@ import path from 'node:path'
 
 import { resolveRequestedPathForIpc } from './hardening'
 
-function runGit(gitBin, args, cwd): Promise<string> {
+// `git worktree list --porcelain` record.
+interface Worktree {
+  path: string
+  branch: null | string
+  detached: boolean
+  bare: boolean
+  locked: boolean
+}
+
+interface AddWorktreeOptions {
+  base?: string
+  branch?: string
+  existingBranch?: string
+  name?: string
+}
+
+// `runGit` stamps the captured stderr onto the rejected execFile error so
+// callers can match on git's message.
+type GitExecError = Error & { stderr?: string }
+
+function runGit(gitBin: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       gitBin,
@@ -16,7 +36,7 @@ function runGit(gitBin, args, cwd): Promise<string> {
       { cwd, windowsHide: true, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
-          err.stderr = String(stderr || '')
+          ;(err as GitExecError).stderr = String(stderr || '')
           reject(err)
 
           return
@@ -29,9 +49,9 @@ function runGit(gitBin, args, cwd): Promise<string> {
 }
 
 // Parse `git worktree list --porcelain`. The first record is the main worktree.
-function parseWorktrees(out) {
-  const trees = []
-  let cur = null
+function parseWorktrees(out: string): Worktree[] {
+  const trees: Worktree[] = []
+  let cur: null | Worktree = null
 
   for (const line of out.split('\n')) {
     if (line.startsWith('worktree ')) {
@@ -63,8 +83,8 @@ function parseWorktrees(out) {
   return trees
 }
 
-async function listWorktrees(repoPath, gitBin) {
-  let resolved
+async function listWorktrees(repoPath: unknown, gitBin: string) {
+  let resolved: string
 
   try {
     resolved = resolveRequestedPathForIpc(repoPath, { purpose: 'Worktree list' })
@@ -90,7 +110,7 @@ async function listWorktrees(repoPath, gitBin) {
 // A git-ref-safe branch name (spaces → "-", drop forbidden chars, trim edges),
 // or "" when nothing usable remains. Mirrors the renderer's `gitRef`, so a bad
 // value can't reach `git` no matter the caller (the GUI also enforces live).
-function sanitizeBranch(name) {
+function sanitizeBranch(name: unknown): string {
   return String(name || '')
     .replace(/\s+/g, '-')
     .replace(/[^\w./-]/g, '')
@@ -100,7 +120,7 @@ function sanitizeBranch(name) {
     .replace(/^[-./]+|[-./]+$/g, '')
 }
 
-function slugify(name) {
+function slugify(name: unknown): string {
   const slug = String(name || '')
     .trim()
     .toLowerCase()
@@ -114,7 +134,7 @@ function slugify(name) {
 
 const TRUNK_BRANCHES = ['main', 'master']
 
-async function gitLine(gitBin, args, cwd) {
+async function gitLine(gitBin: string, args: string[], cwd: string): Promise<string> {
   try {
     return (await runGit(gitBin, args, cwd)).trim()
   } catch {
@@ -122,7 +142,7 @@ async function gitLine(gitBin, args, cwd) {
   }
 }
 
-async function defaultBranch(gitBin, cwd) {
+async function defaultBranch(gitBin: string, cwd: string): Promise<string> {
   const remote = (
     await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
   ).replace(/^origin\//, '')
@@ -151,7 +171,7 @@ async function defaultBranch(gitBin, cwd) {
 // with a root commit on the user's behalf so worktrees "just work". No-op for a
 // repo that already has commits; never touches the user's files (the seed commit
 // is `--allow-empty`), and never inits a dir that already lives inside a repo.
-async function ensureGitRepo(gitBin, dir) {
+async function ensureGitRepo(gitBin: string, dir: string): Promise<void> {
   let needsRoot = false
 
   try {
@@ -194,14 +214,14 @@ async function ensureGitRepo(gitBin, dir) {
 
 // Resolve the repo's MAIN worktree root, so `.worktrees/` always nests under the
 // primary checkout even when called from a linked worktree.
-async function mainRoot(gitBin, cwd) {
+async function mainRoot(gitBin: string, cwd: string): Promise<string> {
   const list = await listWorktrees(cwd, gitBin)
   const main = list.find(tree => tree.isMain)
 
   return main ? main.path : cwd
 }
 
-function uniqueDir(base) {
+function uniqueDir(base: string): string {
   let dir = base
   let n = 1
 
@@ -213,7 +233,7 @@ function uniqueDir(base) {
   return dir
 }
 
-async function addExistingBranchWorktree(gitBin, root, name) {
+async function addExistingBranchWorktree(gitBin: string, root: string, name: unknown) {
   const branch = sanitizeBranch(name)
 
   if (!branch) {
@@ -232,7 +252,7 @@ async function addExistingBranchWorktree(gitBin, root, name) {
   return { path: dir, branch, repoRoot: root }
 }
 
-async function addWorktree(repoPath, options, gitBin) {
+async function addWorktree(repoPath: unknown, options: AddWorktreeOptions | null | undefined, gitBin: string) {
   const resolved = resolveRequestedPathForIpc(repoPath, { purpose: 'Worktree add' })
   // A new project's folder may not be a git repo yet — init it (with a root
   // commit) so the worktree has something to branch from.
@@ -284,7 +304,8 @@ async function addWorktree(repoPath, options, gitBin) {
   } catch (err) {
     // Branch name may already exist — retry checking out the existing branch
     // into a fresh worktree dir instead of failing the whole flow.
-    if (/already exists/i.test(err.stderr || '')) {
+    // `runGit` rejects with the execFile error it stamped `stderr` onto.
+    if (/already exists/i.test((err as GitExecError).stderr || '')) {
       await runGit(gitBin, ['worktree', 'add', dir, branch], root)
     } else {
       throw err
@@ -294,7 +315,12 @@ async function addWorktree(repoPath, options, gitBin) {
   return { path: dir, branch, repoRoot: root }
 }
 
-async function removeWorktree(repoPath, worktreePath, options, gitBin) {
+async function removeWorktree(
+  repoPath: unknown,
+  worktreePath: unknown,
+  options: { force?: boolean } | null | undefined,
+  gitBin: string
+) {
   const resolvedRepo = resolveRequestedPathForIpc(repoPath, { purpose: 'Worktree remove (repo)' })
   const resolvedTree = resolveRequestedPathForIpc(worktreePath, { purpose: 'Worktree remove (tree)' })
   const root = await mainRoot(gitBin, resolvedRepo)
@@ -314,8 +340,8 @@ async function removeWorktree(repoPath, worktreePath, options, gitBin) {
 // recently committed first. Each carries whether it's already checked out in a
 // worktree and, when checked out, that worktree's path. Empty on a non-repo /
 // remote backend where the probe can't run.
-async function listBranches(repoPath, gitBin) {
-  let resolved
+async function listBranches(repoPath: unknown, gitBin: string) {
+  let resolved: string
 
   try {
     resolved = resolveRequestedPathForIpc(repoPath, { purpose: 'Branch list' })
@@ -331,7 +357,12 @@ async function listBranches(repoPath, gitBin) {
     )
 
     const trees = await listWorktrees(resolved, gitBin)
-    const pathByBranch = new Map(trees.filter(tree => tree.branch).map(tree => [tree.branch, tree.path]))
+
+    // The filter keeps only trees whose branch is a non-empty string.
+    const pathByBranch = new Map<string, string>(
+      trees.filter(tree => tree.branch).map((tree): [string, string] => [tree.branch!, tree.path])
+    )
+
     const trunk = await defaultBranch(gitBin, resolved)
 
     return out
@@ -349,7 +380,7 @@ async function listBranches(repoPath, gitBin) {
   }
 }
 
-async function switchBranch(repoPath, branch, gitBin) {
+async function switchBranch(repoPath: unknown, branch: unknown, gitBin: string) {
   const resolved = resolveRequestedPathForIpc(repoPath, { purpose: 'Branch switch' })
   const target = sanitizeBranch(branch)
 
@@ -366,8 +397,8 @@ async function switchBranch(repoPath, branch, gitBin) {
 // refs. Listed most-recently-committed first; the remote's default branch
 // (origin/HEAD) is flagged so the UI can preselect it. Empty on a non-repo /
 // remote backend where the probe can't run.
-async function listBaseBranches(repoPath, gitBin) {
-  let resolved
+async function listBaseBranches(repoPath: unknown, gitBin: string) {
+  let resolved: string
 
   try {
     resolved = resolveRequestedPathForIpc(repoPath, { purpose: 'Base branch list' })
@@ -401,7 +432,8 @@ async function listBaseBranches(repoPath, gitBin) {
       .map(line => line.trim())
       .filter(Boolean)
       .map(line => {
-        const [name] = line.split('\t')
+        // `line` is non-empty (filtered above), so split yields a first segment.
+        const name = line.split('\t')[0]!
 
         return {
           name,

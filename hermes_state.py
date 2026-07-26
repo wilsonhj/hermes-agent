@@ -4059,11 +4059,12 @@ class SessionDB:
         if not session_id:
             return None
         now = time.time()
-        row = self._conn.execute(
-            "SELECT holder FROM compression_locks "
-            "WHERE session_id = ? AND expires_at >= ?",
-            (session_id, now),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT holder FROM compression_locks "
+                "WHERE session_id = ? AND expires_at >= ?",
+                (session_id, now),
+            ).fetchone()
         if row is None:
             return None
         return row["holder"] if isinstance(row, sqlite3.Row) else row[0]
@@ -9344,7 +9345,13 @@ class SessionDB:
     _FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
 
     def _fts_table_exists(self, name: str) -> bool:
-        """True if an FTS5 virtual table is queryable in this DB."""
+        """True if an FTS5 virtual table is queryable in this DB.
+
+        Caller MUST already hold ``self._lock`` — this probes ``self._conn``
+        directly and inherits its caller's lock (see ``optimize_fts`` /
+        ``rebuild_fts``). ``self._lock`` is a plain, non-reentrant
+        ``threading.Lock``, so acquiring it here would deadlock.
+        """
         try:
             self._conn.execute(f"SELECT 1 FROM {name} LIMIT 0")
             return True
@@ -9573,37 +9580,38 @@ class SessionDB:
         Returns ``{"state", "platform", "error"}`` or None if the session has
         no handoff record.
         """
-        try:
-            cur = self._conn.execute(
-                "SELECT handoff_state, handoff_platform, handoff_error "
-                "FROM sessions WHERE id = ?",
-                (session_id,),
-            )
-            row = cur.fetchone()
-            if not row:
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT handoff_state, handoff_platform, handoff_error "
+                    "FROM sessions WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
+            except Exception:
                 return None
-            return {
-                "state": row["handoff_state"],
-                "platform": row["handoff_platform"],
-                "error": row["handoff_error"],
-            }
-        except Exception:
+        if not row:
             return None
+        return {
+            "state": row["handoff_state"],
+            "platform": row["handoff_platform"],
+            "error": row["handoff_error"],
+        }
 
     def list_pending_handoffs(self) -> List[Dict[str, Any]]:
         """Return all sessions in handoff_state='pending', oldest first.
 
         Used by the gateway's handoff watcher.
         """
-        try:
-            cur = self._conn.execute(
-                "SELECT * FROM sessions "
-                "WHERE handoff_state = 'pending' "
-                "ORDER BY started_at ASC"
-            )
-            return [dict(r) for r in cur.fetchall()]
-        except Exception:
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT * FROM sessions "
+                    "WHERE handoff_state = 'pending' "
+                    "ORDER BY started_at ASC"
+                ).fetchall()
+            except Exception:
+                return []
+        return [dict(r) for r in rows]
 
     def claim_handoff(self, session_id: str) -> bool:
         """Atomically transition pending → running. Returns True if claimed."""
