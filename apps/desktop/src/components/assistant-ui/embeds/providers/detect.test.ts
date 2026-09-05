@@ -115,6 +115,30 @@ describe('detectEmbed — Twitter/X', () => {
   })
 })
 
+describe('detectEmbed — iframe isolation', () => {
+  it('resolves every supported provider to a frame embedUrl, never a tweet renderer', () => {
+    const samples = [
+      'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      'https://vimeo.com/76979871',
+      'https://www.instagram.com/p/CabcDEF123/',
+      'https://www.pinterest.com/pin/1234567890/',
+      'https://www.tiktok.com/@user/video/7212345678901234567',
+      'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
+      'https://twitter.com/jack/status/20',
+      'https://x.com/jack/status/20',
+      'https://www.google.com/maps/@40.7128,-74.0060,12z',
+      'https://www.openstreetmap.org/#map=12/40.7128/-74.0060'
+    ]
+
+    for (const url of samples) {
+      const embed = frame(url)
+
+      expect(embed.renderer).toBe('frame')
+      expect(embed.embedUrl).toMatch(/^https:\/\//)
+    }
+  })
+})
+
 describe('detectEmbed — non-matches', () => {
   it.each([
     'https://example.com/watch?v=dQw4w9WgXcQ',
