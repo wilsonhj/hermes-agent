@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import { EXTERNALLY_OPENABLE_EXTS, isExternallyOpenablePath } from './external-open'
+import {
+  EXTERNALLY_OPENABLE_EXTS,
+  isExternallyOpenablePath,
+  isPreviewInBrowserOpenablePath
+} from './external-open'
 
 // ---------------------------------------------------------------------------
 // The point of the gate: `shell.openPath` executes what the OS associates with
@@ -60,7 +64,6 @@ test('documents and media a user would plausibly open are allowed', () => {
     '/tmp/sheet.xlsx',
     '/tmp/doc.docx',
     '/tmp/deck.pptx',
-    '/tmp/page.html',
     '/tmp/chart.png',
     '/tmp/photo.jpeg',
     '/tmp/clip.mp4',
@@ -110,6 +113,29 @@ test('an extensionless file is refused', () => {
   assert.equal(isExternallyOpenablePath('/tmp/report.pdf.'), false)
 })
 
+test('html and svg stay off the openPath allowlist', () => {
+  assert.equal(isExternallyOpenablePath('/tmp/page.html'), false)
+  assert.equal(isExternallyOpenablePath('/tmp/page.htm'), false)
+  assert.equal(isExternallyOpenablePath('/tmp/chart.svg'), false)
+})
+
+test('preview-in-browser re-allows html only', () => {
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/page.html'), true)
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/page.htm'), true)
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/Page.HTML'), true)
+
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/report.pdf'), true)
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/chart.png'), true)
+
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/chart.svg'), false)
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/deploy.sh'), false)
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/install.command'), false)
+  assert.equal(isPreviewInBrowserOpenablePath('/tmp/setup.bat'), false)
+  assert.equal(isPreviewInBrowserOpenablePath('/Applications/Calculator.app'), false)
+  assert.equal(isPreviewInBrowserOpenablePath('/usr/local/bin/hermes'), false)
+  assert.equal(isPreviewInBrowserOpenablePath('/Applications/Calculator.app', { isDirectory: true }), false)
+})
+
 test('empty and non-string-ish input is refused rather than throwing', () => {
   assert.equal(isExternallyOpenablePath(''), false)
   assert.equal(isExternallyOpenablePath('   '), false)
@@ -145,7 +171,10 @@ test('the allowlist is an allowlist: entries are lowercase, dot-prefixed, and ho
     '.scr',
     '.sh',
     '.vbs',
-    '.wsf'
+    '.wsf',
+    '.htm',
+    '.html',
+    '.svg'
   ]) {
     assert.equal(EXTERNALLY_OPENABLE_EXTS.has(banned), false, `${banned} must never enter the allowlist`)
   }

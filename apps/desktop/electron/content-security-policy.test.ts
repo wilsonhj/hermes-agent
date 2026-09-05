@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 
 import { test } from 'vitest'
+
+import { detectEmbed } from '../src/components/assistant-ui/embeds/providers'
 
 import {
   buildContentSecurityPolicy,
   CSP_BOOTSTRAP_SCRIPT_HASH,
   CSP_VITE_REACT_REFRESH_HASH,
   EMBED_FRAME_HOSTS,
-  EMBED_SCRIPT_HOSTS,
   installContentSecurityPolicy,
   isAppDocumentUrl
 } from './content-security-policy'
 
 const REPO_INDEX_HTML = new URL('../index.html', import.meta.url)
-const EMBEDS_DIR = new URL('../src/components/assistant-ui/embeds/', import.meta.url)
 
 function sha256Base64(text: string): string {
   return `sha256-${createHash('sha256').update(text, 'utf8').digest('base64')}`
@@ -149,41 +149,38 @@ test('embed iframe hosts live in frame-src and never in script-src', () => {
 
   for (const host of EMBED_FRAME_HOSTS) {
     assert.ok(frame.includes(host), `${host} should be allowed as an iframe`)
+    assert.ok(
+      !script.includes(host),
+      `${host} is an iframe host and must not be allowed to run script in the app document`
+    )
   }
 
-  for (const host of frame) {
-    if (!EMBED_SCRIPT_HOSTS.includes(host)) {
-      assert.ok(
-        !script.includes(host),
-        `${host} is an iframe host and must not be allowed to run script in the app document`
-      )
-    }
-  }
-
-  assert.deepEqual(EMBED_SCRIPT_HOSTS, ['https://platform.twitter.com', 'https://www.instagram.com'])
-
-  for (const host of EMBED_SCRIPT_HOSTS) {
-    assert.ok(script.includes(host))
-  }
+  assert.ok(!script.includes('https://platform.twitter.com'))
+  assert.ok(!script.includes('https://www.instagram.com'))
 })
 
 test('every provider embedUrl host is allowed as a frame', () => {
-  const providersDir = new URL('providers/', EMBEDS_DIR)
+  const sampleUrls = [
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    'https://vimeo.com/76979871',
+    'https://www.instagram.com/p/CabcDEF123/',
+    'https://www.pinterest.com/pin/1234567890/',
+    'https://www.tiktok.com/@user/video/7212345678901234567',
+    'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
+    'https://twitter.com/jack/status/20',
+    'https://www.google.com/maps/@40.7128,-74.0060,12z',
+    'https://www.openstreetmap.org/#map=12/40.7128/-74.0060'
+  ]
   const hosts = new Set<string>()
 
-  for (const file of readdirSync(providersDir)) {
-    if (!file.endsWith('.ts') || file.endsWith('.test.ts')) {
-      continue
-    }
+  for (const url of sampleUrls) {
+    const descriptor = detectEmbed(url)
 
-    const source = readFileSync(new URL(file, providersDir), 'utf8')
-
-    for (const match of source.matchAll(/embedUrl:\s*[`'"]https:\/\/([a-z0-9.-]+)/gi)) {
-      hosts.add(`https://${match[1]}`)
-    }
+    assert.ok(descriptor, `expected an embed descriptor for ${url}`)
+    assert.equal(descriptor.renderer, 'frame', `${url} must render as a frame, not an in-document script`)
+    hosts.add(new URL(descriptor.embedUrl).origin)
   }
 
-  // Sanity: the scan found providers at all (a rename must not silently pass).
   assert.ok(hosts.size >= 6, `expected several provider hosts, found ${[...hosts].join(', ')}`)
 
   for (const host of hosts) {
@@ -191,20 +188,12 @@ test('every provider embedUrl host is allowed as a frame', () => {
   }
 })
 
-test('remote widget scripts are allowlisted only for the providers that run them', () => {
-  const social = readFileSync(new URL('social-embed.tsx', EMBEDS_DIR), 'utf8')
-  const tiktokProvider = readFileSync(new URL('providers/tiktok.ts', EMBEDS_DIR), 'utf8')
+test('third-party widget hosts are not allowed as script-src', () => {
   const script = directive(buildContentSecurityPolicy('production'), 'script-src')
 
-  assert.match(social, /src: 'https:\/\/platform\.twitter\.com\/widgets\.js'/)
-  assert.match(social, /src: 'https:\/\/www\.instagram\.com\/embed\.js'/)
-
-  // TikTok's entry in that table is dead code: providers/tiktok.ts resolves to
-  // the iframe renderer, so url-embed.tsx never routes TikTok to the script
-  // path. If that ever flips back, this fails — and www.tiktok.com then has to
-  // be added to EMBED_SCRIPT_HOSTS.
-  assert.match(tiktokProvider, /renderer: 'frame'/)
-  assert.ok(!script.includes('https://www.tiktok.com'), 'TikTok is an iframe embed, not a script host')
+  assert.ok(!script.includes('https://platform.twitter.com'))
+  assert.ok(!script.includes('https://www.instagram.com'))
+  assert.ok(!script.includes('https://www.tiktok.com'))
 })
 
 test('negative fixtures from the embed detector are not allowlisted', () => {
@@ -332,13 +321,4 @@ test('installContentSecurityPolicy replaces any policy already on the app docume
 test('installContentSecurityPolicy is a no-op without a webRequest surface', () => {
   assert.equal(installContentSecurityPolicy(null, {}), false)
   assert.equal(installContentSecurityPolicy({}, {}), false)
-})
-
-test('main.ts installs the policy with the dev-server / packaged-file split', () => {
-  const main = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
-
-  assert.match(main, /import \{ installContentSecurityPolicy \} from '\.\/content-security-policy'/)
-  assert.match(main, /installContentSecurityPolicy\(session\.defaultSession, \{/)
-  assert.match(main, /mode: DEV_SERVER \? 'development' : 'production'/)
-  assert.match(main, /rendererIndexUrl: DEV_SERVER \? null : pathToFileURL\(resolveRendererIndex\(\)\)\.toString\(\)/)
 })

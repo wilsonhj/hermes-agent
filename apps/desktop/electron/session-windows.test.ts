@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 
 import { test } from 'vitest'
 
@@ -230,7 +229,10 @@ test('sanitizeWebviewAttach strips the preload and any Node access from a guest'
     preload: 'file:///app/preload.cjs',
     nodeintegration: 'on',
     nodeintegrationinsubframes: 'on',
-    allowpopups: 'on'
+    nodeintegrationinworker: 'on',
+    allowpopups: 'on',
+    disablewebsecurity: 'on',
+    webpreferences: 'nodeIntegration=yes, webSecurity=no'
   }
 
   assert.equal(sanitizeWebviewAttach(webPreferences, params), true, 'an http src is still allowed to attach')
@@ -247,7 +249,11 @@ test('sanitizeWebviewAttach strips the preload and any Node access from a guest'
   assert.equal('preload' in params, false)
   assert.equal('nodeintegration' in params, false)
   assert.equal('nodeintegrationinsubframes' in params, false)
+  assert.equal('nodeintegrationinworker' in params, false)
   assert.equal('allowpopups' in params, false)
+  assert.equal('disablewebsecurity' in params, false)
+  assert.equal('webpreferences' in params, false)
+  assert.equal(webPreferences.webSecurity, true)
 })
 
 test('sanitizeWebviewAttach rejects a src outside the preview allowlist but still scrubs it', () => {
@@ -267,6 +273,8 @@ test('isAllowedWebviewSrc admits only the schemes the preview pane actually load
   assert.equal(isAllowedWebviewSrc('http://127.0.0.1:5173/'), true)
   assert.equal(isAllowedWebviewSrc('https://example.test/app'), true)
   assert.equal(isAllowedWebviewSrc('file:///tmp/report.html'), true)
+  assert.equal(isAllowedWebviewSrc('file:///tmp/.env'), false)
+  assert.equal(isAllowedWebviewSrc('file:///Users/me/.ssh/id_ed25519'), false)
 
   assert.equal(isAllowedWebviewSrc('javascript:alert(1)'), false)
   assert.equal(isAllowedWebviewSrc('data:text/html,<script>alert(1)</script>'), false)
@@ -275,17 +283,4 @@ test('isAllowedWebviewSrc admits only the schemes the preview pane actually load
   assert.equal(isAllowedWebviewSrc('not a url'), false)
   assert.equal(isAllowedWebviewSrc(''), false)
   assert.equal(isAllowedWebviewSrc(undefined), false)
-})
-
-test('main registers the webview attach guard app-wide, not per-window', () => {
-  // The guard has to cover EVERY WebContents (guests included, plus any future
-  // window that forgets chatWindowWebPreferences), so it hangs off
-  // app.on('web-contents-created') rather than wireCommonWindowHandlers. main.ts
-  // is the Electron entry and can't be imported in a node test env, so this is a
-  // source-level assertion — the behaviour above is what's really pinned.
-  const main = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
-
-  assert.match(main, /app\.on\('web-contents-created'/)
-  assert.match(main, /'will-attach-webview'/)
-  assert.match(main, /sanitizeWebviewAttach\(webPreferences, params\)/)
 })

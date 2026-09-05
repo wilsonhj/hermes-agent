@@ -16,12 +16,13 @@ export const twitter: EmbedMatcher = url => {
   }
 
   return {
+    embedUrl: `https://platform.twitter.com/embed/Tweet.html?id=${id}&dnt=true`,
+    height: 450,
     id: `twitter:${id}`,
     label: 'X',
     maxWidth: 480,
     provider: 'twitter',
-    renderer: 'tweet',
-    sourceUrl: url.toString(),
-    tweetId: id
+    renderer: 'frame',
+    sourceUrl: url.toString()
   }
 }

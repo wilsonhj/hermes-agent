@@ -1,12 +1,10 @@
 // Content-Security-Policy for the renderer.
 //
-// Why this exists: the transcript renders MODEL OUTPUT, and rich embeds pull
-// REMOTE scripts into the app document (social-embed.tsx appends
-// platform.twitter.com/widgets.js and www.instagram.com/embed.js to
-// document.body). That document also holds the `hermesDesktop` preload bridge —
-// terminal spawn, fs read/write, git, openExternal — so any script that runs
-// there runs with the desktop's full IPC reach. Before this module there was no
-// CSP at all: any host could have been script-injected into that context.
+// Why this exists: the transcript renders MODEL OUTPUT, and that document also
+// holds the `hermesDesktop` preload bridge — terminal spawn, fs read/write, git,
+// openExternal — so any script that runs there runs with the desktop's full IPC
+// reach. Rich embeds load as cross-origin iframes (frame-src), never as scripts
+// in this document. Before this module there was no CSP at all.
 //
 // DELIVERY (two layers, both needed):
 //
@@ -62,18 +60,6 @@ const CSP_BOOTSTRAP_SCRIPT_HASH = 'sha256-thP3Xi4D3xLhY5XYiK6vCmNBel4nusdd7+E9sS
  */
 const CSP_VITE_REACT_REFRESH_HASH = 'sha256-Z2/iFzh9VMlVkEOar1f/oSHWwQk3ve1qk/C2WdsC4Xk='
 
-// Hosts whose JavaScript is loaded INTO the app document (script-src). Kept
-// deliberately tiny — this is the directive that decides who gets to touch the
-// preload bridge.
-//   platform.twitter.com  widgets.js, injected by social-embed.tsx for tweets
-//   www.instagram.com     embed.js, injected by social-embed.tsx for posts/reels
-// NOTE: www.tiktok.com/embed.js also appears in social-embed.tsx's SCRIPT table
-// but is unreachable — providers/tiktok.ts resolves TikTok to `renderer:
-// 'frame'`, so url-embed.tsx routes it to the plain-iframe renderer and never
-// to the script path. It is therefore an iframe host, not a script host. If
-// TikTok is ever routed back through SocialEmbedRenderer, add it HERE too.
-const EMBED_SCRIPT_HOSTS = ['https://platform.twitter.com', 'https://www.instagram.com']
-
 // Hosts loaded as IFRAMES (frame-src). These execute in their own origin, not
 // ours, so listing them grants no access to the bridge. Sourced from the
 // `embedUrl` each provider actually builds in
@@ -81,6 +67,8 @@ const EMBED_SCRIPT_HOSTS = ['https://platform.twitter.com', 'https://www.instagr
 // those providers merely match on (youtu.be, m.youtube.com, twitter.com,
 // fr.pinterest.com, vimeo.com … are inputs, never frame targets), and NOT from
 // the negative fixtures in detect.test.ts (example.com, github.com).
+// Twitter and Instagram used to inject widgets.js / embed.js into this
+// document; they now use official iframes only, so they stay off script-src.
 const EMBED_FRAME_HOSTS = [
   // providers/youtube.ts builds a youtube-nocookie.com/embed URL; www.youtube.com
   // is listed because YouTube redirects the privacy-enhanced player there in some
@@ -89,7 +77,7 @@ const EMBED_FRAME_HOSTS = [
   'https://www.youtube.com',
   // providers/vimeo.ts
   'https://player.vimeo.com',
-  // instagram embed.js swaps the blockquote for a www.instagram.com iframe
+  // providers/instagram.ts (www.instagram.com/<type>/<code>/embed)
   'https://www.instagram.com',
   // providers/pinterest.ts
   'https://assets.pinterest.com',
@@ -103,8 +91,7 @@ const EMBED_FRAME_HOSTS = [
   'https://www.google.com',
   // providers/maps.ts (OpenStreetMap export/embed.html)
   'https://www.openstreetmap.org',
-  // twitter widgets.js renders the tweet in a platform.twitter.com iframe and
-  // falls back to syndication.twitter.com for some card types
+  // providers/twitter.ts (platform.twitter.com/embed/Tweet.html)
   'https://platform.twitter.com',
   'https://syndication.twitter.com'
 ]
@@ -156,8 +143,7 @@ function buildContentSecurityPolicy(mode: CspMode = 'production'): string {
         // preview). It permits wasm compilation only — NOT eval() of JS.
         "'wasm-unsafe-eval'",
         // CSP hash sources are keyword-quoted, e.g. 'sha256-…'.
-        ...scriptHashes.map(hash => `'${hash}'`),
-        ...EMBED_SCRIPT_HOSTS
+        ...scriptHashes.map(hash => `'${hash}'`)
       ]
     ],
     [
@@ -308,7 +294,6 @@ export {
   CSP_BOOTSTRAP_SCRIPT_HASH,
   CSP_VITE_REACT_REFRESH_HASH,
   EMBED_FRAME_HOSTS,
-  EMBED_SCRIPT_HOSTS,
   installContentSecurityPolicy,
   isAppDocumentUrl
 }

@@ -3,7 +3,9 @@
 // here so they can be unit-tested with node --test (mirroring how the rest of
 // electron/*.ts splits testable logic out of the main.ts monolith).
 
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import { sensitiveFileBlockReason } from './hardening'
 
 // Secondary windows open at the minimum usable size — a compact side panel for
 // subagent watch / cmd-click session pop-out, not a second full desktop.
@@ -59,7 +61,25 @@ function isAllowedWebviewSrc(src) {
   }
 
   try {
-    return WEBVIEW_ALLOWED_PROTOCOLS.has(new URL(src).protocol)
+    const parsed = new URL(src)
+
+    if (!WEBVIEW_ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+      return false
+    }
+
+    if (parsed.protocol === 'file:') {
+      let filePath
+
+      try {
+        filePath = fileURLToPath(parsed)
+      } catch {
+        return false
+      }
+
+      return sensitiveFileBlockReason(filePath) == null
+    }
+
+    return true
   } catch {
     return false
   }
@@ -87,7 +107,10 @@ function sanitizeWebviewAttach(webPreferences: any = {}, params: any = {}) {
   delete params.preload
   delete params.nodeintegration
   delete params.nodeintegrationinsubframes
+  delete params.nodeintegrationinworker
   delete params.allowpopups
+  delete params.disablewebsecurity
+  delete params.webpreferences
 
   return isAllowedWebviewSrc(params.src)
 }

@@ -79,7 +79,7 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
-import { isExternallyOpenablePath } from './external-open'
+import { isExternallyOpenablePath, isPreviewInBrowserOpenablePath } from './external-open'
 import { readDirForIpc } from './fs-read-dir'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { scanGitRepos } from './git-repo-scan'
@@ -1313,6 +1313,28 @@ async function openPreviewInBrowser(rawUrl) {
       localPath = resolveRequestedPathForIpc(parsed.toString(), { purpose: 'Open preview in browser' })
     } catch {
       return false
+    }
+
+    let isDirectory = false
+
+    try {
+      isDirectory = fs.statSync(localPath).isDirectory()
+    } catch {
+      isDirectory = false
+    }
+
+    if (!isPreviewInBrowserOpenablePath(localPath, { isDirectory })) {
+      rememberLog(
+        `[preview] refusing to open ${path.extname(localPath) || '(no extension)'}; revealing in folder instead`
+      )
+
+      try {
+        shell.showItemInFolder(localPath)
+      } catch (revealError) {
+        rememberLog(`[preview] showItemInFolder failed: ${revealError.message}`)
+      }
+
+      return true
     }
 
     await shell.openExternal(pathToFileURL(localPath).toString())

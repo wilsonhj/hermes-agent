@@ -45,7 +45,6 @@ const OPENABLE_MEDIA_EXTS = [
   '.ogg',
   '.opus',
   '.png',
-  '.svg',
   '.tif',
   '.tiff',
   '.wav',
@@ -62,6 +61,8 @@ const OPENABLE_MEDIA_EXTS = [
  *     Script Host and `.py` runs under a registered interpreter, so "open in my
  *     editor" is not what the OS necessarily does. The app already has an
  *     in-app text preview (`hermes:readFileText`) for reading these.
+ *   - Local HTML/SVG (.htm .html .svg). A browser will execute script in them;
+ *     `openPreviewInBrowser` is the dedicated path that re-allows HTML only.
  *   - Macro-enabled Office formats (.docm .xlsm .pptm .dotm …), which exist
  *     specifically to carry code.
  *   - Archives and disk images (.zip .dmg .iso …), which are mount/extract
@@ -72,8 +73,6 @@ const OPENABLE_DOCUMENT_EXTS = [
   '.doc',
   '.docx',
   '.epub',
-  '.htm',
-  '.html',
   '.json',
   '.log',
   '.markdown',
@@ -136,4 +135,33 @@ export function isExternallyOpenablePath(filePath: string, options: { isDirector
   }
 
   return EXTERNALLY_OPENABLE_EXTS.has(ext)
+}
+
+/**
+ * Extra extensions `openPreviewInBrowser` may hand to `shell.openExternal`.
+ * `.html`/`.htm` are the preview pane's whole point, but they stay off the
+ * `openPath` allowlist: a browser will execute script in a local HTML file.
+ */
+const PREVIEW_IN_BROWSER_EXTS = new Set(['.htm', '.html'])
+
+/**
+ * True when `filePath` may be handed to `shell.openExternal` as a `file:` URL
+ * from the preview-in-browser path. Same gate as `isExternallyOpenablePath`,
+ * plus `.html`/`.htm`. Executables, bundles, and extensionless files stay out.
+ */
+export function isPreviewInBrowserOpenablePath(
+  filePath: string,
+  options: { isDirectory?: boolean } = {}
+): boolean {
+  if (isExternallyOpenablePath(filePath, options)) {
+    return true
+  }
+
+  if (options.isDirectory) {
+    return false
+  }
+
+  const ext = path.extname(String(filePath || '')).toLowerCase()
+
+  return PREVIEW_IN_BROWSER_EXTS.has(ext)
 }
