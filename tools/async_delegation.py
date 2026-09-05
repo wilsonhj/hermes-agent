@@ -481,12 +481,21 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
         # Same isolation as the recovery loops: a corrupt result payload must
         # degrade this row to result=None, not raise out of a status query.
         try:
-            result = json.loads(row[4])
+            parsed = json.loads(row[4])
         except (json.JSONDecodeError, TypeError, ValueError):
             logger.warning(
                 "Async delegation %s: unreadable result_json in durable row; "
                 "reporting result=None.", delegation_id,
             )
+        else:
+            if isinstance(parsed, dict):
+                result = parsed
+            else:
+                logger.warning(
+                    "Async delegation %s: result_json is %s, not an object; "
+                    "reporting result=None.",
+                    delegation_id, type(parsed).__name__,
+                )
     return {
         "delegation_id": delegation_id, "origin_session": row[0], "state": row[1],
         "dispatched_at": row[2], "completed_at": row[3],

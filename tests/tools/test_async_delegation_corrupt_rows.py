@@ -149,3 +149,21 @@ def test_corrupt_result_json_degrades_status_query_instead_of_raising():
     assert durable is not None
     assert durable["result"] is None
     assert durable["delegation_id"] == "deleg_bad_result"
+
+
+@pytest.mark.parametrize(
+    "bad_payload", ['"bare"', "[1,2]"],
+    ids=["json-string", "json-list"],
+)
+def test_non_object_result_json_degrades_status_query_instead_of_raising(bad_payload):
+    _dispatch("deleg_non_object_result")
+    _sql(
+        "UPDATE async_delegations SET result_json=? WHERE delegation_id=?",
+        (bad_payload, "deleg_non_object_result"),
+    )
+
+    durable = ad.get_durable_delegation("deleg_non_object_result")
+    assert durable is not None
+    assert isinstance(durable, dict)
+    assert durable["result"] is None
+    assert durable["delegation_id"] == "deleg_non_object_result"

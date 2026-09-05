@@ -30,7 +30,6 @@ import pytest
 from hermes_state import SessionDB
 
 
-BLOCKED_TIMEOUT_S = 0.5
 COMPLETE_TIMEOUT_S = 10.0
 
 
@@ -51,19 +50,42 @@ def session_id(db):
     return sid
 
 
+class _ObserveLock:
+    """Proxy that signals before forwarding acquire to the real lock."""
+
+    def __init__(self, inner, entered):
+        self._inner = inner
+        self._entered = entered
+
+    def __enter__(self):
+        self._entered.set()
+        return self._inner.__enter__()
+
+    def __exit__(self, *args):
+        return self._inner.__exit__(*args)
+
+    def acquire(self, *args, **kwargs):
+        self._entered.set()
+        return self._inner.acquire(*args, **kwargs)
+
+    def release(self):
+        return self._inner.release()
+
+
 def _assert_blocks_until_db_lock_released(db, call):
     """Run *call* on a worker thread while holding ``db._lock``.
 
-    Asserts the call makes no progress until the lock is released, then
-    returns its result. A reader that touches ``self._conn`` without the
-    lock finishes during the held window and fails the first assertion.
+    Asserts the call enters ``with self._lock`` (event-based) and does not
+    finish until that lock is released, then returns its result. A reader
+    that skips the lock never sets the enter event (or would already have
+    finished by the time we observe it).
     """
-    entered = threading.Event()
+    inner = db._lock
+    entered_lock = threading.Event()
     finished = threading.Event()
     box = {}
 
     def _worker():
-        entered.set()
         try:
             box["result"] = call()
         except BaseException as exc:  # pragma: no cover - surfaced below
@@ -72,15 +94,24 @@ def _assert_blocks_until_db_lock_released(db, call):
             finished.set()
 
     t = threading.Thread(target=_worker, daemon=True)
-    with db._lock:
-        t.start()
-        assert entered.wait(COMPLETE_TIMEOUT_S), "worker thread never started"
-        assert not finished.wait(BLOCKED_TIMEOUT_S), (
-            "read completed while the SessionDB lock was held — it is "
-            "touching the shared sqlite3 connection without serializing"
-        )
-    assert finished.wait(COMPLETE_TIMEOUT_S), "read never completed after unlock"
-    t.join(COMPLETE_TIMEOUT_S)
+    db._lock = _ObserveLock(inner, entered_lock)
+    try:
+        inner.acquire()
+        try:
+            t.start()
+            assert entered_lock.wait(COMPLETE_TIMEOUT_S), (
+                "read never entered with self._lock"
+            )
+            assert not finished.is_set(), (
+                "read completed while the SessionDB lock was held — it is "
+                "touching the shared sqlite3 connection without serializing"
+            )
+        finally:
+            inner.release()
+        assert finished.wait(COMPLETE_TIMEOUT_S), "read never completed after unlock"
+        t.join(COMPLETE_TIMEOUT_S)
+    finally:
+        db._lock = inner
     if "error" in box:
         raise box["error"]
     return box["result"]
